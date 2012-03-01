@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# 90autorandr: Change autorandr profile on thaw/resume
+# 40autorandr: Change autorandr profile on thaw/resume
 
 AUTORANDR="autorandr -c"
 
