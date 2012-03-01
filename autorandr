@@ -108,7 +108,7 @@ setup_fp() {
 	done
 	if [ -z "$FP" ]; then
 		echo "Unable to fingerprint display configuration" >&2
-	e:return
+		return
 	fi
 	echo "$FP"
 }
