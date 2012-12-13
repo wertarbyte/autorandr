@@ -164,6 +164,13 @@ config_equal() {
 }
 
 load_cfg_xrandr() {
+	# Disable all displays first. There is a bug in xrandr where trying to enable a different display
+	# when two displays are already attached gives the error "cannot find crtc for output" even
+	# when --off was passed to disable existing displays. If --off is called first as a separate
+	# command the crtcs are freed up for use.
+	# https://bugs.freedesktop.org/show_bug.cgi?id=22539
+	# https://bugs.freedesktop.org/show_bug.cgi?id=29929
+	$XRANDR | grep -P '(^[^ ]+) (dis)?connected' | sed -r 's/(^[^ ]+).*/--output \1 --off/' | xargs $XRANDR
 	sed 's!^!--!' "$1" | xargs $XRANDR
 }
 
