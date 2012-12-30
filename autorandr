@@ -250,6 +250,7 @@ if [ -n "$LOAD_PROFILE" ]; then
 	exit $?
 fi
 
+LOADED=0
 for SETUP_FILE in $PROFILES/*/setup; do
 	if ! [ -e $SETUP_FILE ]; then
 		break
@@ -257,7 +258,11 @@ for SETUP_FILE in $PROFILES/*/setup; do
 	PROFILE="$(basename $(dirname "$SETUP_FILE"))"
 	echo -n "$PROFILE"
 
-	if blocked "$PROFILE"; then
+	if [ "$LOADED" -eq 1 ]; then
+		# profile already loaded, skip the rest
+		echo ""
+		continue
+	elif blocked "$PROFILE"; then
 		echo " (blocked)"
 		continue
 	fi
@@ -268,14 +273,18 @@ for SETUP_FILE in $PROFILES/*/setup; do
 		if [ "$CHANGE_PROFILE" -eq 1 ]; then
 			if [ "$FORCE_LOAD" -eq 1 ] || ! config_equal "$PROFILE"; then
 				load "$PROFILE"
+				LOADED=1
 			fi
 		fi
-		# found the profile, exit with success
-		exit 0
 	else
 		echo ""
 	fi
 done
+
+# found the profile, exit with success
+if [ "$LOADED" -eq 1 ]; then
+	exit 0
+fi
 
 # we did not find the profile, load default
 if [ -n "$DEFAULT_PROFILE" ]; then
