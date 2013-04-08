@@ -45,6 +45,7 @@
 # and saving/loading the current configuration are adjusted accordingly.
 
 XRANDR=/usr/bin/xrandr
+#XRANDR=debug_xrandr
 DISPER=/usr/bin/disper
 XDPYINFO=/usr/bin/xdpyinfo
 PROFILES=~/.autorandr/
@@ -166,8 +167,35 @@ config_equal() {
 	fi
 }
 
+debug_xrandr() {
+    echo "DEBUG: calling xrandr $@"
+    xrandr "$@"
+}
+
 load_cfg_xrandr() {
-	sed 's!^!--!' "$1" | xargs $XRANDR
+    #it's not possible to turn off LVDS1 and turn on HDMI1 in one command. It
+    # should be splitted to per-display  commands 
+    
+    OPTIONS=$(
+        awk ' /^output/ { print ARGS; ARGS=""; }
+             
+               END      { print ARGS; ARGS=""; }
+
+                        { ARGS=ARGS" --"$0; }
+            ' < "$1")
+
+     #first - options which turn off displays
+     {
+        echo "$OPTIONS" | grep -- "--off";
+        echo "$OPTIONS" | grep -v -- "--off"
+     } | while read LINE;do
+            if [ -n "$LINE" ];then
+                $XRANDR $LINE;
+            fi
+         done
+            
+
+#	sed 's!^!--!' "$1" | xargs $XRANDR
 }
 
 load_cfg_disper() {
@@ -179,6 +207,7 @@ load() {
 	local CONF="$PROFILES/$PROFILE/config"
 	if [ -e "$CONF" ] ; then
 		echo " -> loading profile $PROFILE"
+        #echo "DEBUG: LOAD_METHOD=$LOAD_METHOD CONF=$CONF"
 		$LOAD_METHOD "$CONF"
 
 		[ -x "$PROFILES/$PROFILE/postswitch" ] && \
