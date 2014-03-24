@@ -167,6 +167,8 @@ config_equal() {
 }
 
 load_cfg_xrandr() {
+	# Turn off unused displays before applying the profile's settings
+	grep -B 1 off "$1" | grep -v VIRTUAL | grep -v -- -- | uniq | sed 's!^!--!' | xargs $XRANDR
 	sed 's!^!--!' "$1" | xargs $XRANDR
 }
 
