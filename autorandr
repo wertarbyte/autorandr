@@ -2,7 +2,22 @@
 #
 # Automatically select a display configuration based on connected devices
 #
-# Stefan Tomanek <stefan.tomanek@wertarbyte.de>
+# Copyright (c) 2013 Stefan Tomanek <stefan.tomanek@wertarbyte.de>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+#
 #
 # How to use:
 #
@@ -47,8 +62,13 @@
 XRANDR=/usr/bin/xrandr
 DISPER=/usr/bin/disper
 XDPYINFO=/usr/bin/xdpyinfo
-PROFILES=~/.autorandr/
+PROFILES=~/.autorandr
 CONFIG=~/.autorandr.conf
+RESERVED_PROFILE_NAMES=`cat <<EOF
+ common     Clone all connected outputs at the largest common resolution
+ horizontal Stack all connected outputs horizontally at their largest resolution
+ vertical   Stack all connected outputs vertically at their largest resolution
+EOF`
 
 CHANGE_PROFILE=0
 FORCE_LOAD=0
@@ -73,24 +93,45 @@ if [ -f $CONFIG ]; then
 	. $CONFIG
 fi
 
+if ! which xxd 2>&1 >/dev/null; then
+	xxd() {
+		# xxd replacement for systems without vim. Ugly, but the only simple
+		# version that both Python 2 and 3 understand that I could come up with.
+		# awk can only do one direction, it has no ord() function.
+		if [ "$1" = "-r" ]; then
+			python -c "import binascii, sys; getattr(sys.stdout, 'buffer', sys.stdout).write(binascii.unhexlify(getattr(sys.stdin, 'buffer', sys.stdin).read()))"
+		else
+			python -c "import binascii, sys; getattr(sys.stdout, 'buffer', sys.stdout).write(binascii.hexlify(getattr(sys.stdin, 'buffer', sys.stdin).read()))"
+			echo
+		fi
+	}
+fi
+
 setup_fp_xrandr_edid() {
 	$XRANDR -q --verbose | awk '
-	/^[^ ]+ (dis)?connected / { DEV=$1; }
-	$1 ~ /^[a-f0-9]+$/ { ID[DEV] = ID[DEV] $1 }
-	END { for (X in ID) { print X " " ID[X]; } }'
+	ORS="";
+	/ (dis)?connected/ { DEVICE=gensub("-([A-Z]-)?", "", "g", $1) " "; }
+	/^[[:blank:]]+EDID:/ {
+		print DEVICE
+		DEVICE=""
+		for(getline; /^[[:blank:]]+[0-9a-f]+$/; getline) {
+			print $1;
+		}
+		print "\n";
+	}
+	END {
+		print "\n";
+	}
+	'
 }
 
 setup_fp_sysfs_edid() {
-	# xrandr triggers the reloading of EDID data
 	$XRANDR -q > /dev/null
-	# hash the EDIDs of all _connected_ devices
-	for P in /sys/class/drm/card*-*/; do
-		# nothing found
-		[ ! -d "$P" ] && continue
-		if grep -q "^connected$" < "${P}status"; then
-			echo -n "$(basename "$P") "
-			md5sum ${P}edid | awk '{print $1}'
-		fi
+	for DEVICE in /sys/class/drm/card*-*; do
+		[ -e "${DEVICE}/status" ] && grep -q "^connected$" "${DEVICE}/status" || continue
+		echo -n "$(echo "${DEVICE}/edid" | sed -re 's#^.+card[0-9]+-([^/]+).+#\1#; s#-([A-Z]-)?##') "
+			cat "${DEVICE}/edid" | xxd -c 256 -ps | awk 'ORS=""; /.+/ { print; }'
+		echo
 	done
 }
 
@@ -110,7 +151,7 @@ setup_fp() {
 		echo "Unable to fingerprint display configuration" >&2
 		return
 	fi
-	echo "$FP"
+	echo "$FP" | sort
 }
 
 current_cfg_xrandr() {
@@ -121,20 +162,45 @@ current_cfg_xrandr() {
 	$XRANDR -q | awk -v primary_setup="${PRIMARY_SETUP}" '
 	# display is connected and has a mode
 	/^[^ ]+ connected [^(]/ {
-		split($3, A, "+");
+		output=$1
 		print "output "$1;
+		if ($3 == "primary") {
+			print $3
+			split($4, A, "+")
+			$4=$5
+		}
+		else {
+			split($3, A, "+");
+			if (A[1] A[2] "," A[3] == primary_setup)
+				print "primary";
+		}
+		if (($4 == "left") || ($4 == "right")) {
+			split(A[1], B, "x");
+			A[1] = B[2]"x"B[1];
+		}
 		print "mode "A[1];
 		print "pos "A[2]"x"A[3];
 		if ($4 !~ /^\(/) {
 			print "rotate "$4;
 		}
-		if (A[1] A[2] "," A[3] == primary_setup)
-			print "primary";
+		else {
+			print "rotate normal";
+		}
 		next;
+	}
+	/  [0-9]+x[0-9]+ .+/ {
+		if (output) {
+			for (n=1; n<10; n++) {
+				if($n ~ /[0-9]+\.[0-9]+\*/) {
+					print "rate " gensub(/(+|\*)/, "", "g", $n);
+				}
+			}
+		}
 	}
 	# disconnected or disabled displays
 	/^[^ ]+ (dis)?connected / ||
 	/^[^ ]+ unknown connection / {
+		output=""
 		print "output "$1;
 		print "off";
 		next;
@@ -143,6 +209,95 @@ current_cfg_xrandr() {
 
 current_cfg_disper() {
 	$DISPER -p
+}
+
+common_cfg_xrandr() {
+	$XRANDR -q | awk '
+	# variables:
+	#   output: current output
+	#   outputlist: space sep list of all outputs
+	#   outputarr: array of all connected outputs
+	#   outputarrsize: number of connected outputs
+	#   modelist[800x600]: space sep list of outputs supporting mode
+	# display is connected
+	/^[^ ]+ connected / {
+	    output=$1;
+	    outputlist=outputlist " " output
+	    outputarr[outputarrsize++]=output
+	}
+	# disconnected or disabled displays
+	/^[^ ]+ disconnected / ||
+	/^[^ ]+ unknown connection / {
+	    print "output " $1;
+	    print "off";
+	}
+	# modes available on a screen
+	/^   [0-9]+x[0-9]+/ {
+	    modelist[$1]=modelist[$1] " " output
+	}
+	END {
+	    # find common mode with largest screen area
+	    for (m in modelist) {
+		if (modelist[m] == outputlist) {
+		    # calculate area of resolution
+		    split(m, wh, "x");
+		    if (wh[1]*wh[2] >= maxdim) {
+			maxdim=wh[1]*wh[2]
+			maxmode=m
+		    }
+		}
+	    }
+	    if (maxmode) {
+		for (i in outputarr) {
+		    print "output " outputarr[i];
+		    print "mode " maxmode;
+		    print "pos 0x0";
+		    if (i > 0) {
+		        print "same-as " outputarr[0]
+		    }
+		}
+	    }
+	}' \
+		| load_cfg_xrandr -
+}
+
+stack_cfg_xrandr() {
+	$XRANDR -q | awk -v stack="${STACK}" '
+	# variables:
+	#   stack: "horizontal" (anything except vertical) or "vertical"
+	#   output: current output
+	#   firstmode: pick first mode after output
+	#   posX,posY: position of the next output
+	BEGIN {
+	    posX=posY=0
+	}
+	# display is connected
+	/^[^ ]+ connected / {
+	    output=$1;
+	    print "output " $1;
+	    firstmode=1
+	}
+	# disconnected or disabled displays
+	/^[^ ]+ disconnected / ||
+	/^[^ ]+ unknown connection / {
+	    print "output " $1;
+	    print "off";
+	}
+	# modes available on a screen, but pick only the first
+	/^   [0-9]+x[0-9]+/ {
+	    if (!firstmode) next;
+	    firstmode=0
+	    # output mode at current virtual desktop pos
+	    print "mode " $1;
+	    print "pos " posX "x" posY;
+	    # calculate position of next output
+	    split($1, wh, "x");
+	    if (stack == "vertical")
+		posY += wh[2];
+	    else
+		posX += wh[1];
+	}' \
+		| load_cfg_xrandr -
 }
 
 current_cfg() {
@@ -167,7 +322,39 @@ config_equal() {
 }
 
 load_cfg_xrandr() {
-	sed 's!^!--!' "$1" | xargs $XRANDR
+	# sed 1: Prefix arguments with "--"
+	# sed 2: Merge arguments into one line per output
+	# sed 3:  * Merge all --off outputs into the first line
+	#         * Place the output with --pos 0x0 on the second line
+	#         * Remaining outputs are appended as they appear
+	#         * Keep everything in hold buffer until the last line
+	# sed 4: Remove empty lines caused by G and H on empty hold buffer
+	# sed 5: Join lines enabling screens in pairs of two (See https://github.com/phillipberndt/autorandr/pull/6)
+	sed 's/^/--/' "$1" | sed -e '
+		:START
+		/\n--output/{P;D}
+		s/\n/ /
+		N;bSTART' | sed -e '
+			/ --off/{
+				G
+				# Merge with next line if it contains --off
+				s/\n\([^\n]* --off\)/ \1/
+				h
+				$!d;b
+			}
+			/ --pos 0x0/{
+				G
+				# Swap lines 1 and 2 if --off is found
+				/ --off/ s/^\([^\n]*\)\n\([^\n]*\)/\2\n\1/
+				h
+				$!d;b
+			}
+			H
+			$!d
+			x' | sed -e '
+				/./ !d' | sed -e '
+					/--mode/{ N; s/\n/ /; }
+				' | xargs -L 1 $XRANDR
 }
 
 load_cfg_disper() {
@@ -177,14 +364,45 @@ load_cfg_disper() {
 load() {
 	local PROFILE="$1"
 	local CONF="$PROFILES/$PROFILE/config"
-	if [ -e "$CONF" ] ; then
-		echo " -> loading profile $PROFILE"
-		$LOAD_METHOD "$CONF"
+	local IS_VIRTUAL_PROFILE=`echo "$RESERVED_PROFILE_NAMES" | grep -c "^ $PROFILE "`
 
-		[ -x "$PROFILES/$PROFILE/postswitch" ] && \
-			"$PROFILES/$PROFILE/postswitch" "$PROFILE"
-		[ -x "$PROFILES/postswitch" ] && \
-			"$PROFILES/postswitch" "$PROFILE"
+	if [ ! -f "$CONF" -a $IS_VIRTUAL_PROFILE -eq 0 ]; then
+		echo " -> Error: Profile '$PROFILE' does not exist." >&2
+		return
+	fi
+
+	if [ -x "$PROFILES/preswitch" ]; then
+		"$PROFILES/preswitch" "$PROFILE"
+	fi
+	if [ -x "$PROFILES/$PROFILE/preswitch" ]; then
+		"$PROFILES/$PROFILE/preswitch" "$PROFILE"
+	fi
+
+	if [ -f "$CONF" ]; then
+		echo " -> loading profile $PROFILE"
+		if [ $IS_VIRTUAL_PROFILE -ne 0 ]; then
+			echo " -> Warning: Existing profile overrides virtual profile with same name" >&2
+		fi
+		$LOAD_METHOD "$CONF"
+	else
+		# Virtual profiles
+		if [ $PROFILE = "common" ]; then
+			echo " -> setting largest common mode in cloned mode"
+			common_cfg_xrandr
+	        elif [ $PROFILE = "horizontal" ]; then
+			echo " -> stacking all outputs horizontally at their largest modes"
+			STACK="horizontal" stack_cfg_xrandr
+	        elif [ $PROFILE = "vertical" ]; then
+			echo " -> stacking all outputs vertically at their largest modes"
+			STACK="vertical" stack_cfg_xrandr
+		fi
+	fi
+
+	if [ -x "$PROFILES/$PROFILE/postswitch" ]; then
+		"$PROFILES/$PROFILE/postswitch" "$PROFILE"
+	fi
+	if [ -x "$PROFILES/postswitch" ]; then
+		"$PROFILES/postswitch" "$PROFILE"
 	fi
 }
 
@@ -196,7 +414,7 @@ Usage: $SCRIPTNAME [options]
 -c, --change 		reload current setup
 -s, --save <profile>	save your current setup to profile <profile>
 -l, --load <profile> 	load profile <profile>
--d, --default <profile> make profile <profile> the default profile 
+-d, --default <profile> make profile <profile> the default profile
 --force			force (re)loading of a profile
 --fingerprint		fingerprint your current hardware setup
 --config		dump your current xrandr setup
@@ -217,6 +435,9 @@ Usage: $SCRIPTNAME [options]
  When called by the name "autodisper" or "auto-disper", the script uses "disper"
  instead of "xrandr" to detect, configure and save the display configuration.
 
+ If xrandr is used, the following virtual configurations are available:
+${RESERVED_PROFILE_NAMES}
+
 EOH
 	exit
 }
@@ -231,7 +452,7 @@ while true; do
 		-d|--default) DEFAULT_PROFILE="$2"; shift 2 ;;
 		-s|--save) SAVE_PROFILE="$2"; shift 2 ;;
 		-l|--load) LOAD_PROFILE="$2"; shift 2 ;;
-	 	-h|--help) help ;; 
+	 	-h|--help) help ;;
 		--force) FORCE_LOAD=1; shift ;;
 		--fingerprint) setup_fp; exit 0;;
 		--config) current_cfg; exit 0;;
@@ -243,6 +464,10 @@ done
 CURRENT_SETUP="$(setup_fp)"
 
 if [ -n "$SAVE_PROFILE" ]; then
+	if echo "$RESERVED_PROFILE_NAMES" | grep -q "^ $SAVE_PROFILE "; then
+		echo "Cannot save current configuration as profile '${SAVE_PROFILE}': This configuration name is a reserved virtual configuration."
+		exit 1
+	fi
 	echo "Saving current configuration as profile '${SAVE_PROFILE}'"
 	mkdir -p "$PROFILES/$SAVE_PROFILE"
 	echo "$CURRENT_SETUP" > "$PROFILES/$SAVE_PROFILE/setup"
@@ -267,7 +492,27 @@ for SETUP_FILE in $PROFILES/*/setup; do
 		continue
 	fi
 
-	FILE_SETUP="$(cat "$PROFILES/$PROFILE/setup")"
+	# This sed command is for compatibility with old versions that did not try
+	# to normalize device names
+	FILE_SETUP="$(sed -re 's#-([A-Z]-)?##g; s#card[0-9]##;' "$PROFILES/$PROFILE/setup")"
+	# Detect the md5sum in fingerprint files created using the old sysfs fingerprinting
+	# If it is detected, output a warning and calculate the legacy variant of the current
+	# setup.
+	if echo "$FILE_SETUP" | grep -Eq "^[^ ]+ [0-9a-f]{32}$"; then
+		echo -n " (Obsolete fingerprint format. Please update using --save.) "
+
+		if [ -z "$LEGACY_CURRENT_SETUP" ]; then
+			LEGACY_CURRENT_SETUP="$(echo "$CURRENT_SETUP" | while read DEVICE EDID; do
+				echo -n "${DEVICE} "
+				echo -n "${EDID}" | xxd -r -ps | md5sum - | awk '{print $1}'
+			done)"
+		fi
+		FILE_SETUP="$(echo "$FILE_SETUP" | sort)"
+		if [ "$LEGACY_CURRENT_SETUP" = "$FILE_SETUP" ]; then
+			CURRENT_SETUP="$LEGACY_CURRENT_SETUP"
+		fi
+	fi
+
 	if [ "$CURRENT_SETUP" = "$FILE_SETUP" ]; then
 		echo " (detected)"
 		if [ "$CHANGE_PROFILE" -eq 1 ]; then
@@ -288,3 +533,10 @@ if [ -n "$DEFAULT_PROFILE" ]; then
 	load "$DEFAULT_PROFILE"
 fi
 exit 1
+
+# Local Variables:
+# tab-width: 8
+# sh-basic-offset: 8
+# sh-indentation: 8
+# indent-tabs-mode: t
+# End:
