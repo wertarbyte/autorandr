@@ -45,6 +45,7 @@
 # and saving/loading the current configuration are adjusted accordingly.
 
 XRANDR=/usr/bin/xrandr
+UNXRANDR=/usr/bin/unxrandr
 DISPER=/usr/bin/disper
 XDPYINFO=/usr/bin/xdpyinfo
 PROFILES=~/.autorandr/
@@ -60,6 +61,12 @@ CURRENT_CFG_METHOD="current_cfg_xrandr"
 LOAD_METHOD="load_cfg_xrandr"
 
 SCRIPTNAME="$(basename $0)"
+# when called as auto-arandr, we'll use unxrandr for dumping current xrandr state
+# unxrandr is a command line tool distributed along with arandr
+if [ "$SCRIPTNAME" = "auto-arandr" ]; then
+  echo "Using arandr as config dump method..." >&2
+  CURRENT_CFG_METHOD="current_cfg_arandr"
+fi
 # when called as autodisper/auto-disper, we assume different defaults
 if [ "$SCRIPTNAME" = "auto-disper" ] || [ "$SCRIPTNAME" = "autodisper" ]; then
 	echo "Assuming disper defaults..." >&2
@@ -111,6 +118,10 @@ setup_fp() {
 		return
 	fi
 	echo "$FP"
+}
+
+current_cfg_arandr() {
+  unxrandr | sed -e 's/ --/\n/g' | tail -n +2
 }
 
 current_cfg_xrandr() {
@@ -178,6 +189,11 @@ load() {
 	local PROFILE="$1"
 	local CONF="$PROFILES/$PROFILE/config"
 	if [ -e "$CONF" ] ; then
+		[ -x "$PROFILES/preswitch" ] && \
+			"$PROFILES/preswitch" "$PROFILE"
+		[ -x "$PROFILES/$PROFILE/preswitch" ] && \
+			"$PROFILES/$PROFILE/preswitch" "$PROFILE"
+
 		echo " -> loading profile $PROFILE"
 		$LOAD_METHOD "$CONF"
 
